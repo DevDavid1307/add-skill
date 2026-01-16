@@ -9,7 +9,8 @@ import { installSkillForAgent, isSkillInstalled, getInstallPath } from './instal
 import { detectInstalledAgents, agents } from './agents.js';
 import { track, setVersion } from './telemetry.js';
 import { getFavourites, addFavourite, removeFavourite } from './favourites.js';
-import type { Skill, AgentType, Favourite } from './types.js';
+import { searchSkills, getApiToken, formatStars, formatDate } from './search.js';
+import type { Skill, AgentType, Favourite, SearchSkill } from './types.js';
 import packageJson from '../package.json' with { type: 'json' };
 
 const version = packageJson.version;
@@ -22,6 +23,7 @@ interface Options {
   skill?: string[];
   list?: boolean;
   favourites?: boolean;
+  search?: boolean;
 }
 
 program
@@ -35,15 +37,18 @@ program
   .option('-l, --list', 'List available skills in the repository without installing')
   .option('-y, --yes', 'Skip confirmation prompts')
   .option('-f, --favourites', 'Manage favourite repositories')
+  .option('-S, --search', 'Search skills from skillsmp.com')
   .action(async (source: string | undefined, options: Options) => {
-    if (options.favourites) {
+    if (options.search) {
+      await manageSearch(options);
+    } else if (options.favourites) {
       await manageFavourites(options);
     } else if (source) {
       await main(source, options);
     } else {
       console.log();
       p.intro(chalk.bgCyan.black(' add-skill '));
-      p.log.error('No source provided. Use -f to manage favourites or provide a source.');
+      p.log.error('No source provided. Use -S to search skills, -f to manage favourites, or provide a source.');
       p.outro(chalk.dim('Run add-skill --help for usage information'));
       process.exit(1);
     }
@@ -463,4 +468,245 @@ async function promptInstallFromFavourite(options: Options) {
   const fav = selected as Favourite;
   console.log();
   await main(fav.repo, options);
+}
+
+async function manageSearch(options: Options) {
+  console.log();
+  p.intro(chalk.bgMagenta.black(' add-skill ') + chalk.dim(' search'));
+
+  const token = getApiToken();
+  if (!token) {
+    p.log.error('SKILLS_MP_AI environment variable is not set.');
+    p.log.info('Please set your API token to use the search feature:');
+    p.log.message(chalk.dim('  export SKILLS_MP_AI=your_api_token'));
+    p.outro(chalk.red('Search unavailable'));
+    process.exit(1);
+  }
+
+  let currentPage = 1;
+  let currentQuery = '';
+  let sortBy: 'stars' | 'recent' = 'stars';
+
+  while (true) {
+    if (!currentQuery) {
+      const query = await p.text({
+        message: 'Search for skills',
+        placeholder: 'e.g., git, testing, docker...',
+        validate: (value) => {
+          if (!value.trim()) return 'Please enter a search query';
+          return undefined;
+        },
+      });
+
+      if (p.isCancel(query)) {
+        p.outro(chalk.dim('Goodbye!'));
+        process.exit(0);
+      }
+
+      currentQuery = query as string;
+      currentPage = 1;
+    }
+
+    const spinner = p.spinner();
+    spinner.start('Searching...');
+
+    try {
+      const result = await searchSkills(currentQuery, {
+        page: currentPage,
+        limit: 10,
+        sortBy,
+      });
+
+      spinner.stop(`Found ${chalk.green(result.pagination.total)} skills`);
+
+      if (result.skills.length === 0) {
+        p.log.warn('No skills found. Try a different search query.');
+        currentQuery = '';
+        continue;
+      }
+
+      console.log();
+      displaySearchResults(result.skills, result.pagination);
+      console.log();
+
+      const actionChoices: { value: string; label: string; hint?: string }[] = [];
+
+      if (result.skills.length > 0) {
+        actionChoices.push({
+          value: 'install',
+          label: 'Install skill',
+          hint: 'Select a skill to install',
+        });
+        actionChoices.push({
+          value: 'favourite',
+          label: 'Add to favourites',
+          hint: 'Save a skill to favourites',
+        });
+      }
+
+      if (result.pagination.hasNext) {
+        actionChoices.push({
+          value: 'next',
+          label: 'Next page',
+          hint: `Page ${currentPage + 1} of ${result.pagination.totalPages}`,
+        });
+      }
+
+      if (result.pagination.hasPrev) {
+        actionChoices.push({
+          value: 'prev',
+          label: 'Previous page',
+          hint: `Page ${currentPage - 1} of ${result.pagination.totalPages}`,
+        });
+      }
+
+      actionChoices.push({
+        value: 'sort',
+        label: `Sort by: ${sortBy === 'stars' ? 'stars' : 'recent'}`,
+        hint: 'Toggle sort order',
+      });
+
+      actionChoices.push({
+        value: 'new',
+        label: 'New search',
+        hint: 'Search for different skills',
+      });
+
+      actionChoices.push({
+        value: 'exit',
+        label: 'Exit',
+        hint: 'Return to terminal',
+      });
+
+      const action = await p.select({
+        message: 'What would you like to do?',
+        options: actionChoices,
+      });
+
+      if (p.isCancel(action) || action === 'exit') {
+        p.outro(chalk.dim('Goodbye!'));
+        process.exit(0);
+      }
+
+      if (action === 'next') {
+        currentPage++;
+        continue;
+      }
+
+      if (action === 'prev') {
+        currentPage--;
+        continue;
+      }
+
+      if (action === 'sort') {
+        sortBy = sortBy === 'stars' ? 'recent' : 'stars';
+        currentPage = 1;
+        continue;
+      }
+
+      if (action === 'new') {
+        currentQuery = '';
+        continue;
+      }
+
+      if (action === 'install') {
+        await promptInstallFromSearch(result.skills, options);
+      }
+
+      if (action === 'favourite') {
+        await promptAddFavouriteFromSearch(result.skills);
+      }
+
+    } catch (error) {
+      spinner.stop(chalk.red('Search failed'));
+      p.log.error(error instanceof Error ? error.message : 'Unknown error occurred');
+      currentQuery = '';
+    }
+
+    console.log();
+  }
+}
+
+function displaySearchResults(skills: SearchSkill[], pagination: { page: number; totalPages: number; total: number }) {
+  p.log.step(chalk.bold(`Search Results`) + chalk.dim(` (page ${pagination.page}/${pagination.totalPages}, ${pagination.total} total)`));
+
+  for (let i = 0; i < skills.length; i++) {
+    const skill = skills[i]!;
+    const index = chalk.dim(`${i + 1}.`);
+    const name = chalk.cyan.bold(skill.name);
+    const author = chalk.dim(`by ${skill.author}`);
+    const stars = chalk.yellow(`★ ${formatStars(skill.stars)}`);
+    const updated = chalk.dim(`updated ${formatDate(skill.updatedAt)}`);
+
+    p.log.message(`${index} ${name} ${author} ${stars} ${updated}`);
+
+    const desc = skill.description.length > 70
+      ? skill.description.slice(0, 67) + '...'
+      : skill.description;
+    p.log.message(`   ${chalk.dim(desc)}`);
+    p.log.message(`   ${chalk.blue.underline(skill.githubUrl)}`);
+  }
+}
+
+async function promptInstallFromSearch(skills: SearchSkill[], options: Options) {
+  const selected = await p.select({
+    message: 'Select skill to install',
+    options: skills.map((skill, i) => ({
+      value: skill,
+      label: `${i + 1}. ${skill.name}`,
+      hint: `by ${skill.author} - ★ ${formatStars(skill.stars)}`,
+    })),
+  });
+
+  if (p.isCancel(selected)) return;
+
+  const skill = selected as SearchSkill;
+
+  console.log();
+  p.log.info(`Installing ${chalk.cyan(skill.name)} from ${chalk.dim(skill.githubUrl)}`);
+  console.log();
+
+  await main(skill.githubUrl, options);
+}
+
+async function promptAddFavouriteFromSearch(skills: SearchSkill[]) {
+  const selected = await p.select({
+    message: 'Select skill to add to favourites',
+    options: skills.map((skill, i) => ({
+      value: skill,
+      label: `${i + 1}. ${skill.name}`,
+      hint: `by ${skill.author} - ★ ${formatStars(skill.stars)}`,
+    })),
+  });
+
+  if (p.isCancel(selected)) return;
+
+  const skill = selected as SearchSkill;
+
+  const description = await p.text({
+    message: 'Description',
+    placeholder: skill.description,
+    defaultValue: skill.description,
+    validate: (value) => {
+      if (!value.trim()) return 'Description is required';
+      return undefined;
+    },
+  });
+
+  if (p.isCancel(description)) return;
+
+  console.log();
+  p.log.step(chalk.bold('Add to Favourites'));
+  p.log.message(`  ${chalk.dim('Repo:')} ${chalk.cyan(skill.githubUrl)}`);
+  p.log.message(`  ${chalk.dim('Description:')} ${description}`);
+  console.log();
+
+  const confirmed = await p.confirm({
+    message: 'Add to favourites?',
+  });
+
+  if (p.isCancel(confirmed) || !confirmed) return;
+
+  await addFavourite(skill.githubUrl, description as string, true);
+  p.log.success(`Added ${chalk.cyan(skill.name)} to favourites`);
 }

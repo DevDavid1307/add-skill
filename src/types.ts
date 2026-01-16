@@ -32,3 +32,44 @@ export interface FavouritesData {
   version: number;
   favourites: Favourite[];
 }
+
+export interface SearchSkill {
+  id: string;
+  name: string;
+  author: string;
+  description: string;
+  githubUrl: string;
+  skillUrl: string;
+  stars: number;
+  updatedAt: number;
+}
+
+export interface SearchPagination {
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+  hasNext: boolean;
+  hasPrev: boolean;
+}
+
+export interface SearchFilters {
+  search: string;
+  sortBy: string;
+  marketplaceOnly: boolean;
+}
+
+export interface SearchResult {
+  skills: SearchSkill[];
+  pagination: SearchPagination;
+  filters: SearchFilters;
+}
+
+export interface SearchResponse {
+  success: boolean;
+  data: SearchResult;
+  meta: {
+    requestId: string;
+    responseTimeMs: number;
+  };
+}

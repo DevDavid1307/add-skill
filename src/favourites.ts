@@ -51,13 +51,12 @@ export function normalizeRepo(input: string): string {
   return parsed.url;
 }
 
-export async function addFavourite(repo: string, description: string): Promise<Favourite> {
+export async function addFavourite(repo: string, description: string, skipNormalize = false): Promise<Favourite> {
   const data = await loadFavourites();
-  const normalizedRepo = normalizeRepo(repo);
 
   const favourite: Favourite = {
     id: randomUUID().slice(0, 8),
-    repo: normalizedRepo,
+    repo: skipNormalize ? repo : normalizeRepo(repo),
     description,
     addedAt: new Date().toISOString(),
   };
