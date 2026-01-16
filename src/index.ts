@@ -487,6 +487,19 @@ async function manageSearch(options: Options) {
   let currentQuery = '';
   let sortBy: 'stars' | 'recent' = 'stars';
 
+  // Load favourites once for checking favourited status
+  const favourites = await getFavourites();
+  const favouriteUrls = new Set(favourites.map(f => f.repo));
+
+  // Helper to check if a skill is favourited
+  const isFavourited = (skill: SearchSkill): boolean => {
+    // Check both full URL and owner/repo format
+    if (favouriteUrls.has(skill.githubUrl)) return true;
+    const match = skill.githubUrl.match(/github\.com\/([^/]+\/[^/]+?)(?:\.git)?$/);
+    if (match && favouriteUrls.has(match[1]!)) return true;
+    return false;
+  };
+
   while (true) {
     if (!currentQuery) {
       const query = await p.text({
@@ -526,7 +539,7 @@ async function manageSearch(options: Options) {
       }
 
       console.log();
-      displaySearchResults(result.skills, result.pagination);
+      displaySearchResults(result.skills, result.pagination, isFavourited);
       console.log();
 
       const actionChoices: { value: string; label: string; hint?: string }[] = [];
@@ -544,26 +557,45 @@ async function manageSearch(options: Options) {
         });
       }
 
-      if (result.pagination.hasNext) {
-        actionChoices.push({
-          value: 'next',
-          label: 'Next page',
-          hint: `Page ${currentPage + 1} of ${result.pagination.totalPages}`,
-        });
-      }
+      // Pagination options
+      if (result.pagination.totalPages > 1) {
+        const pageOptions: { value: string; label: string; hint?: string }[] = [];
 
-      if (result.pagination.hasPrev) {
-        actionChoices.push({
-          value: 'prev',
-          label: 'Previous page',
-          hint: `Page ${currentPage - 1} of ${result.pagination.totalPages}`,
-        });
+        if (result.pagination.hasPrev) {
+          pageOptions.push({
+            value: 'prev',
+            label: '← Previous',
+          });
+        }
+
+        if (result.pagination.hasNext) {
+          pageOptions.push({
+            value: 'next',
+            label: 'Next →',
+          });
+        }
+
+        if (result.pagination.totalPages > 2) {
+          pageOptions.push({
+            value: 'goto',
+            label: 'Go to page...',
+            hint: `1-${result.pagination.totalPages}`,
+          });
+        }
+
+        if (pageOptions.length > 0) {
+          actionChoices.push({
+            value: 'page',
+            label: `Page ${currentPage}/${result.pagination.totalPages}`,
+            hint: pageOptions.map(o => o.label).join(' | '),
+          });
+        }
       }
 
       actionChoices.push({
         value: 'sort',
         label: `Sort by: ${sortBy === 'stars' ? 'stars' : 'recent'}`,
-        hint: 'Toggle sort order',
+        hint: `Switch to ${sortBy === 'stars' ? 'recent' : 'stars'}`,
       });
 
       actionChoices.push({
@@ -588,14 +620,58 @@ async function manageSearch(options: Options) {
         process.exit(0);
       }
 
-      if (action === 'next') {
-        currentPage++;
-        continue;
-      }
+      if (action === 'page') {
+        // Show pagination sub-menu
+        const pageChoices: { value: string; label: string; hint?: string }[] = [];
 
-      if (action === 'prev') {
-        currentPage--;
-        continue;
+        if (result.pagination.hasPrev) {
+          pageChoices.push({ value: 'prev', label: '← Previous page' });
+        }
+        if (result.pagination.hasNext) {
+          pageChoices.push({ value: 'next', label: 'Next page →' });
+        }
+        if (result.pagination.totalPages > 2) {
+          pageChoices.push({ value: 'goto', label: 'Go to page...', hint: `Enter page 1-${result.pagination.totalPages}` });
+        }
+        pageChoices.push({ value: 'cancel', label: 'Cancel' });
+
+        const pageAction = await p.select({
+          message: `Page ${currentPage} of ${result.pagination.totalPages}`,
+          options: pageChoices,
+        });
+
+        if (p.isCancel(pageAction) || pageAction === 'cancel') {
+          continue;
+        }
+
+        if (pageAction === 'next') {
+          currentPage++;
+          continue;
+        }
+
+        if (pageAction === 'prev') {
+          currentPage--;
+          continue;
+        }
+
+        if (pageAction === 'goto') {
+          const pageInput = await p.text({
+            message: 'Go to page',
+            placeholder: `1-${result.pagination.totalPages}`,
+            validate: (value) => {
+              const num = parseInt(value, 10);
+              if (isNaN(num) || num < 1 || num > result.pagination.totalPages) {
+                return `Please enter a number between 1 and ${result.pagination.totalPages}`;
+              }
+              return undefined;
+            },
+          });
+
+          if (!p.isCancel(pageInput)) {
+            currentPage = parseInt(pageInput as string, 10);
+          }
+          continue;
+        }
       }
 
       if (action === 'sort') {
@@ -610,11 +686,19 @@ async function manageSearch(options: Options) {
       }
 
       if (action === 'install') {
-        await promptInstallFromSearch(result.skills, options);
+        await promptInstallFromSearch(result.skills, options, isFavourited);
       }
 
       if (action === 'favourite') {
-        await promptAddFavouriteFromSearch(result.skills);
+        await promptAddFavouriteFromSearch(result.skills, isFavourited, (url) => {
+          // Update the favourites cache
+          favouriteUrls.add(url);
+          // Also add owner/repo format
+          const match = url.match(/github\.com\/([^/]+\/[^/]+?)(?:\.git)?$/);
+          if (match) {
+            favouriteUrls.add(match[1]!);
+          }
+        });
       }
 
     } catch (error) {
@@ -627,7 +711,11 @@ async function manageSearch(options: Options) {
   }
 }
 
-function displaySearchResults(skills: SearchSkill[], pagination: { page: number; totalPages: number; total: number }) {
+function displaySearchResults(
+  skills: SearchSkill[],
+  pagination: { page: number; totalPages: number; total: number },
+  isFavourited: (skill: SearchSkill) => boolean
+) {
   p.log.step(chalk.bold(`Search Results`) + chalk.dim(` (page ${pagination.page}/${pagination.totalPages}, ${pagination.total} total)`));
 
   for (let i = 0; i < skills.length; i++) {
@@ -637,8 +725,9 @@ function displaySearchResults(skills: SearchSkill[], pagination: { page: number;
     const author = chalk.dim(`by ${skill.author}`);
     const stars = chalk.yellow(`★ ${formatStars(skill.stars)}`);
     const updated = chalk.dim(`updated ${formatDate(skill.updatedAt)}`);
+    const favIndicator = isFavourited(skill) ? chalk.yellow(' ⭐') : '';
 
-    p.log.message(`${index} ${name} ${author} ${stars} ${updated}`);
+    p.log.message(`${index} ${name}${favIndicator} ${author} ${stars} ${updated}`);
 
     const desc = skill.description.length > 70
       ? skill.description.slice(0, 67) + '...'
@@ -648,12 +737,16 @@ function displaySearchResults(skills: SearchSkill[], pagination: { page: number;
   }
 }
 
-async function promptInstallFromSearch(skills: SearchSkill[], options: Options) {
+async function promptInstallFromSearch(
+  skills: SearchSkill[],
+  options: Options,
+  isFavourited: (skill: SearchSkill) => boolean
+) {
   const selected = await p.select({
     message: 'Select skill to install',
     options: skills.map((skill, i) => ({
       value: skill,
-      label: `${i + 1}. ${skill.name}`,
+      label: `${i + 1}. ${skill.name}${isFavourited(skill) ? ' ⭐' : ''}`,
       hint: `by ${skill.author} - ★ ${formatStars(skill.stars)}`,
     })),
   });
@@ -669,19 +762,30 @@ async function promptInstallFromSearch(skills: SearchSkill[], options: Options) 
   await main(skill.githubUrl, options);
 }
 
-async function promptAddFavouriteFromSearch(skills: SearchSkill[]) {
+async function promptAddFavouriteFromSearch(
+  skills: SearchSkill[],
+  isFavourited: (skill: SearchSkill) => boolean,
+  onFavouriteAdded: (url: string) => void
+) {
   const selected = await p.select({
     message: 'Select skill to add to favourites',
     options: skills.map((skill, i) => ({
       value: skill,
-      label: `${i + 1}. ${skill.name}`,
-      hint: `by ${skill.author} - ★ ${formatStars(skill.stars)}`,
+      label: `${i + 1}. ${skill.name}${isFavourited(skill) ? ' ⭐' : ''}`,
+      hint: isFavourited(skill)
+        ? `already favourited`
+        : `by ${skill.author} - ★ ${formatStars(skill.stars)}`,
     })),
   });
 
   if (p.isCancel(selected)) return;
 
   const skill = selected as SearchSkill;
+
+  if (isFavourited(skill)) {
+    p.log.warn(`${chalk.cyan(skill.name)} is already in your favourites`);
+    return;
+  }
 
   const description = await p.text({
     message: 'Description',
@@ -708,5 +812,6 @@ async function promptAddFavouriteFromSearch(skills: SearchSkill[]) {
   if (p.isCancel(confirmed) || !confirmed) return;
 
   await addFavourite(skill.githubUrl, description as string, true);
+  onFavouriteAdded(skill.githubUrl);
   p.log.success(`Added ${chalk.cyan(skill.name)} to favourites`);
 }
