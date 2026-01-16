@@ -51,6 +51,8 @@ npx add-skill git@github.com:vercel-labs/agent-skills.git
 | `-s, --skill <skills...>` | Install specific skills by name |
 | `-l, --list` | List available skills without installing |
 | `-y, --yes` | Skip all confirmation prompts |
+| `-f, --favourites` | Manage favourite repositories |
+| `-S, --search` | Search skills from skillsmp.com |
 | `-V, --version` | Show version number |
 | `-h, --help` | Show help |
 
@@ -71,7 +73,54 @@ npx add-skill vercel-labs/agent-skills --skill frontend-design -g -a claude-code
 
 # Install all skills from a repo
 npx add-skill vercel-labs/agent-skills -y -g
+
+# Search for skills from skillsmp.com
+npx add-skill -S
+
+# Manage favourite repositories
+npx add-skill -f
 ```
+
+## Search Skills
+
+Search for skills from [skillsmp.com](https://skillsmp.com) using the `-S` or `--search` flag.
+
+```bash
+npx add-skill -S
+```
+
+### Setup
+
+To use the search feature, you need to set the `SKILLS_MP_API` environment variable with your API token:
+
+```bash
+export SKILLS_MP_API=your_api_token
+```
+
+### Features
+
+- **Search**: Find skills by keyword
+- **Sort**: Toggle between sorting by stars or recent updates
+- **Pagination**: Browse through search results
+- **Install**: Install skills directly from search results
+- **Favourite**: Save skills to your favourites list
+
+## Favourites
+
+Manage your favourite skill repositories with the `-f` or `--favourites` flag.
+
+```bash
+npx add-skill -f
+```
+
+### Features
+
+- **List favourites**: View all saved repositories
+- **Add favourite**: Save a new repository to favourites
+- **Remove favourite**: Delete a repository from favourites
+- **Install from favourite**: Install skills from a saved repository
+
+Favourites are stored in `~/.config/skill/data.json`.
 
 ## Installation Paths
 
