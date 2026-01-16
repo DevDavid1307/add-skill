@@ -20,3 +20,15 @@ export interface ParsedSource {
   url: string;
   subpath?: string;
 }
+
+export interface Favourite {
+  id: string;
+  repo: string;
+  description: string;
+  addedAt: string;
+}
+
+export interface FavouritesData {
+  version: number;
+  favourites: Favourite[];
+}

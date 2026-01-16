@@ -8,7 +8,8 @@ import { discoverSkills, getSkillDisplayName } from './skills.js';
 import { installSkillForAgent, isSkillInstalled, getInstallPath } from './installer.js';
 import { detectInstalledAgents, agents } from './agents.js';
 import { track, setVersion } from './telemetry.js';
-import type { Skill, AgentType } from './types.js';
+import { getFavourites, addFavourite, removeFavourite } from './favourites.js';
+import type { Skill, AgentType, Favourite } from './types.js';
 import packageJson from '../package.json' with { type: 'json' };
 
 const version = packageJson.version;
@@ -20,20 +21,32 @@ interface Options {
   yes?: boolean;
   skill?: string[];
   list?: boolean;
+  favourites?: boolean;
 }
 
 program
   .name('add-skill')
   .description('Install skills onto coding agents (OpenCode, Claude Code, Codex, Cursor, Antigravity)')
   .version(version)
-  .argument('<source>', 'Git repo URL, GitHub shorthand (owner/repo), or direct path to skill')
+  .argument('[source]', 'Git repo URL, GitHub shorthand (owner/repo), or direct path to skill')
   .option('-g, --global', 'Install skill globally (user-level) instead of project-level')
   .option('-a, --agent <agents...>', 'Specify agents to install to (opencode, claude-code, codex, cursor)')
   .option('-s, --skill <skills...>', 'Specify skill names to install (skip selection prompt)')
   .option('-l, --list', 'List available skills in the repository without installing')
   .option('-y, --yes', 'Skip confirmation prompts')
-  .action(async (source: string, options: Options) => {
-    await main(source, options);
+  .option('-f, --favourites', 'Manage favourite repositories')
+  .action(async (source: string | undefined, options: Options) => {
+    if (options.favourites) {
+      await manageFavourites(options);
+    } else if (source) {
+      await main(source, options);
+    } else {
+      console.log();
+      p.intro(chalk.bgCyan.black(' add-skill '));
+      p.log.error('No source provided. Use -f to manage favourites or provide a source.');
+      p.outro(chalk.dim('Run add-skill --help for usage information'));
+      process.exit(1);
+    }
   });
 
 program.parse();
@@ -318,4 +331,136 @@ async function cleanup(tempDir: string | null) {
       // Ignore cleanup errors
     }
   }
+}
+
+async function manageFavourites(options: Options) {
+  console.log();
+  p.intro(chalk.bgCyan.black(' add-skill ') + chalk.dim(' favourites'));
+
+  while (true) {
+    const action = await p.select({
+      message: 'What would you like to do?',
+      options: [
+        { value: 'list', label: 'List favourites', hint: 'View all saved favourite repositories' },
+        { value: 'add', label: 'Add favourite', hint: 'Save a new repository to favourites' },
+        { value: 'remove', label: 'Remove favourite', hint: 'Delete a repository from favourites' },
+        { value: 'install', label: 'Install from favourite', hint: 'Install skills from a favourite repository' },
+        { value: 'exit', label: 'Exit', hint: 'Return to terminal' },
+      ],
+    });
+
+    if (p.isCancel(action) || action === 'exit') {
+      p.outro(chalk.dim('Goodbye!'));
+      process.exit(0);
+    }
+
+    if (action === 'list') {
+      await listFavourites();
+    } else if (action === 'add') {
+      await promptAddFavourite();
+    } else if (action === 'remove') {
+      await promptRemoveFavourite();
+    } else if (action === 'install') {
+      await promptInstallFromFavourite(options);
+    }
+
+    console.log();
+  }
+}
+
+async function listFavourites() {
+  const favourites = await getFavourites();
+
+  if (favourites.length === 0) {
+    p.log.warn('No favourites saved yet. Add one with "Add favourite".');
+    return;
+  }
+
+  console.log();
+  p.log.step(chalk.bold('Your Favourites'));
+  for (const fav of favourites) {
+    p.log.message(`  ${chalk.cyan(fav.repo)}`);
+    p.log.message(`    ${chalk.dim(fav.description)}`);
+  }
+}
+
+async function promptAddFavourite() {
+  const repo = await p.text({
+    message: 'Repository (e.g., owner/repo or full URL)',
+    placeholder: 'owner/repo',
+    validate: (value) => {
+      if (!value.trim()) return 'Repository is required';
+      return undefined;
+    },
+  });
+
+  if (p.isCancel(repo)) return;
+
+  const description = await p.text({
+    message: 'Description',
+    placeholder: 'What does this repository contain?',
+    validate: (value) => {
+      if (!value.trim()) return 'Description is required';
+      return undefined;
+    },
+  });
+
+  if (p.isCancel(description)) return;
+
+  const favourite = await addFavourite(repo as string, description as string);
+  p.log.success(`Added ${chalk.cyan(favourite.repo)} to favourites`);
+}
+
+async function promptRemoveFavourite() {
+  const favourites = await getFavourites();
+
+  if (favourites.length === 0) {
+    p.log.warn('No favourites to remove.');
+    return;
+  }
+
+  const selected = await p.select({
+    message: 'Select favourite to remove',
+    options: favourites.map(fav => ({
+      value: fav,
+      label: fav.repo,
+      hint: fav.description.length > 50 ? fav.description.slice(0, 47) + '...' : fav.description,
+    })),
+  });
+
+  if (p.isCancel(selected)) return;
+
+  const fav = selected as Favourite;
+  const confirmed = await p.confirm({
+    message: `Remove ${chalk.cyan(fav.repo)} from favourites?`,
+  });
+
+  if (p.isCancel(confirmed) || !confirmed) return;
+
+  await removeFavourite(fav.id);
+  p.log.success(`Removed ${chalk.cyan(fav.repo)} from favourites`);
+}
+
+async function promptInstallFromFavourite(options: Options) {
+  const favourites = await getFavourites();
+
+  if (favourites.length === 0) {
+    p.log.warn('No favourites to install from. Add one first.');
+    return;
+  }
+
+  const selected = await p.select({
+    message: 'Select favourite to install from',
+    options: favourites.map(fav => ({
+      value: fav,
+      label: fav.repo,
+      hint: fav.description.length > 50 ? fav.description.slice(0, 47) + '...' : fav.description,
+    })),
+  });
+
+  if (p.isCancel(selected)) return;
+
+  const fav = selected as Favourite;
+  console.log();
+  await main(fav.repo, options);
 }
